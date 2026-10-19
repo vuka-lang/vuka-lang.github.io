@@ -1,0 +1,75 @@
+name: Deploy
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Build even if the docs haven't changed
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.check.outputs.changed }}
+    steps:
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ github.event_name != 'schedule' }}
+        run: |
+          latest=$(for p in docs editors/vscode/syntaxes; do
+            gh api "repos/vuka-lang/vuka/commits?sha=main&path=$p&per_page=1" --jq '.[0].sha'
+          done | tr '\n' ' ')
+          deployed=$(curl -fsS https://vuka-lang.github.io/version.txt || true)
+          echo "latest=$latest" >> "$GITHUB_OUTPUT"
+          if [ "$FORCE" = true ] || [ "$latest" != "$deployed" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@v7
+        if: steps.check.outputs.changed
+        with:
+          repository: vuka-lang/vuka
+          fetch-depth: 0 # lastUpdated reads git history
+      - uses: actions/setup-node@v7
+        if: steps.check.outputs.changed
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: docs/package-lock.json
+      - if: steps.check.outputs.changed
+        working-directory: docs
+        run: |
+          npm ci
+          npm run build -- --base /
+          printf '%s' "${{ steps.check.outputs.latest }}" > .vitepress/dist/version.txt
+      - uses: actions/upload-pages-artifact@v5
+        if: steps.check.outputs.changed
+        with:
+          path: docs/.vitepress/dist
+
+  deploy:
+    needs: build
+    if: needs.build.outputs.changed
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5
